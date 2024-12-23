@@ -1,113 +1,173 @@
 #include <stdlib.h>
+#include <string.h>
 #include <pthread.h>
 #include <semaphore.h>
+#include <time.h>
 #include <sys/time.h>
 #include <unistd.h>
-#include <string.h>
 
+#define RUN 32
+
+sem_t semaphore;
 
 typedef struct {
-    long long *array;
+    long long* arr;
     long long left;
     long long right;
-} ThreadData;
+} ThreadArgs;
 
 
-sem_t thread_limit;
-
-void merge(long long *array, long long left, long long mid, long long right) {
-    long long i = left, j = mid + 1, k = 0;
-    long long *temp = (long long *)malloc((right - left + 1) * sizeof(long long));
-
-    while (i <= mid && j <= right) {
-        if (array[i] <= array[j]) {
-            temp[k++] = array[i++];
-        } else {
-            temp[k++] = array[j++];
+void insertionSort(long long arr[], long long left, long long right) {
+    for (long long i = left + 1; i <= right; i++) {
+        long long temp = arr[i];
+        long long j = i - 1;
+        while (j >= left && arr[j] > temp) {
+            arr[j + 1] = arr[j];
+            j--;
         }
+        arr[j + 1] = temp;
     }
-
-    while (i <= mid) temp[k++] = array[i++];
-    while (j <= right) temp[k++] = array[j++];
-
-    for (i = left, k = 0; i <= right; i++, k++) {
-        array[i] = temp[k];
-    }
-
-    free(temp);
 }
 
-void tim_sort(long long *array, long long left, long long right) {
-    if (left >= right) return;
 
-    long long mid = left + (right - left) / 2;
-    tim_sort(array, left, mid);
-    tim_sort(array, mid + 1, right);
-    merge(array, left, mid, right);
-}
-
-void *thread_sort(void *arg) {
-    ThreadData *data = (ThreadData *)arg;
-    tim_sort(data->array, data->left, data->right);
-    sem_post(&thread_limit);
+void* insertionSortThread(void* arg) {
+    ThreadArgs* args = (ThreadArgs*) arg;
+    insertionSort(args->arr, args->left, args->right);
+    sem_post(&semaphore);
     return NULL;
 }
 
 
-int main(int argc, char *argv[]) {
-    if (argc < 3) {
-        const char msg[] = "Usage: <max_threads> <array_size>\n";
-        write(STDERR_FILENO, msg, sizeof(msg));
+void merge(long long arr[], long long l, long long m, long long r) {
+    long long len1 = m - l + 1, len2 = r - m;
+    long long* left = (long long*) malloc(len1 * sizeof(long long));
+    long long* right = (long long*) malloc(len2 * sizeof(long long));
+    memcpy(left, arr + l, len1 * sizeof(long long));
+    memcpy(right, arr + m + 1, len2 * sizeof(long long));
+
+    long long i = 0, j = 0, k = l;
+
+    while (i < len1 && j < len2) {
+        if (left[i] <= right[j]) {
+            arr[k++] = left[i++];
+        } else {
+            arr[k++] = right[j++];
+        }
     }
 
-    long long array_size = atoll(argv[2]);
-    int max_threads = atoi(argv[1]);
-
-    if (max_threads <= 0) {
-        const char msg[] = "Incorrect number of threads\n";
-        write(STDERR_FILENO, msg, sizeof(msg));
-        return EXIT_FAILURE;
+    while (i < len1) {
+        arr[k++] = left[i++];
     }
 
-    pthread_t threads[max_threads];
-
-
-    sem_init(&thread_limit, 0, max_threads);
-
-    long long *array = (long long *)malloc(array_size * sizeof(long long));
-    for (long long i = 0; i < array_size; i++) {
-        array[i] = rand() % 1000000;
+    while (j < len2) {
+        arr[k++] = right[j++];
     }
 
-    long long chunk_size = array_size / max_threads;
+    free(left);
+    free(right);
+}
 
-    struct timeval start, end;
-    gettimeofday(&start, NULL);
 
-    for (int i = 0; i < max_threads; i++) {
-        long long left = i * chunk_size;
-        long long right = (i == max_threads - 1) ? array_size - 1 : (left + chunk_size - 1);
+void timSort(long long arr[], long long n, int numThreads) {
+    long long numSegments = (n + RUN - 1) / RUN;
 
-        ThreadData *data = (ThreadData *)malloc(sizeof(ThreadData));
-        data->array = array;
-        data->left = left;
-        data->right = right;
-
-        sem_wait(&thread_limit);
-        pthread_create(&threads[i], NULL, thread_sort, data);
+    pthread_t* threads = (pthread_t*) malloc(numSegments * sizeof(pthread_t));
+    ThreadArgs* threadArgs = (ThreadArgs*) malloc(numSegments * sizeof(ThreadArgs));
+    
+    if (threads == NULL || threadArgs == NULL) {
+        const error[] = "Memory allocation failed for threads or threadArgs\n";
+        write(STDERR_FILENO, error, sizeof(error));
+        free(threads);
+        free(threadArgs);
+        return;
     }
 
-    for (int i = 0; i < max_threads; i++) {
+    long long threadIndex = 0;
+
+    for (long long i = 0; i < n; i += RUN) {
+        long long left = i;
+        long long right = (i + RUN - 1) < (n - 1) ? (i + RUN - 1) : (n - 1);
+        
+        sem_wait(&semaphore);
+
+        threadArgs[threadIndex].arr = arr;
+        threadArgs[threadIndex].left = left;
+        threadArgs[threadIndex].right = right;
+
+        int ret = pthread_create(&threads[threadIndex], NULL, insertionSortThread, (void*) &threadArgs[threadIndex]);
+
+        threadIndex++;
+    }
+
+    for (long long i = 0; i < numSegments; i++) {
         pthread_join(threads[i], NULL);
     }
 
-    gettimeofday(&end, NULL);
+    free(threads);
+    free(threadArgs);
 
-    double time_taken = ((end.tv_sec - start.tv_sec) * 1000000LL + (end.tv_usec - start.tv_usec)) / 1000000.0;
-    printf("Sorting completed in %.6f seconds.\n", time_taken);
+    for (long long size = RUN; size < n; size *= 2) {
+        for (long long left = 0; left < n; left += 2 * size) {
+            long long mid = left + size - 1;
+            long long right = (left + 2 * size - 1) < (n - 1) ? (left + 2 * size - 1) : (n - 1);
 
-    free(array);
-    sem_destroy(&thread_limit);
-
-    return EXIT_SUCCESS;
+            if (mid < right) {
+                merge(arr, left, mid, right);
+            }
+        }
+    }
 }
+
+int main(int argc, char* argv[]) {
+
+    if (argc != 3) {
+        const char msg[] = "Usage: %s <array_size> <number_of_threads>\n";
+        write(STDERR_FILENO, msg, sizeof(msg));
+        return 1;
+    }
+
+    long long size = atoll(argv[1]);
+    int numThreads = atoi(argv[2]);
+
+    long long* arr = (long long*) malloc(size * sizeof(long long));
+    if (arr == NULL) {
+        const char error[] = "Memory allocation failed\n";
+        write(STDERR_FILENO, error, sizeof(error));
+        return 1;
+    }
+
+    srand(time(NULL));
+
+    for (long long i = 0; i < size; i++) {
+        arr[i] = (long long) rand() * RAND_MAX + rand();
+    }
+
+    sem_init(&semaphore, 0, numThreads);
+
+    struct timespec start_time, end_time;
+    double elapsed;
+
+    clock_gettime(CLOCK_REALTIME, &start_time);
+
+    timSort(arr, size, numThreads);
+
+    clock_gettime(CLOCK_REALTIME, &end_time);
+
+    if (end_time.tv_nsec < start_time.tv_nsec) {
+        end_time.tv_sec -= 1;
+        end_time.tv_nsec += 1000000000;
+    }
+    elapsed = (end_time.tv_sec - start_time.tv_sec) +
+              (end_time.tv_nsec - start_time.tv_nsec) / 1000000000.0;
+
+    char msg[100];
+    sprintf(msg, "Sorting took %f seconds\n", elapsed);
+    write(STDOUT_FILENO, msg, strlen(msg));
+
+    free(arr);
+    sem_destroy(&semaphore);
+
+
+    return 0;
+}
+
