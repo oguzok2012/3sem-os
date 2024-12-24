@@ -6,7 +6,9 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#define RUN 32
+#include "utils.h"
+
+#define RUN 512
 
 sem_t semaphore;
 
@@ -75,7 +77,7 @@ void timSort(long long arr[], long long n, int numThreads) {
     ThreadArgs* threadArgs = (ThreadArgs*) malloc(numSegments * sizeof(ThreadArgs));
     
     if (threads == NULL || threadArgs == NULL) {
-        const error[] = "Memory allocation failed for threads or threadArgs\n";
+        const char error[] = "Memory allocation failed for threads or threadArgs\n";
         write(STDERR_FILENO, error, sizeof(error));
         free(threads);
         free(threadArgs);
@@ -160,9 +162,7 @@ int main(int argc, char* argv[]) {
     elapsed = (end_time.tv_sec - start_time.tv_sec) +
               (end_time.tv_nsec - start_time.tv_nsec) / 1000000000.0;
 
-    char msg[100];
-    sprintf(msg, "Sorting took %f seconds\n", elapsed);
-    write(STDOUT_FILENO, msg, strlen(msg));
+    print_time(elapsed);
 
     free(arr);
     sem_destroy(&semaphore);
