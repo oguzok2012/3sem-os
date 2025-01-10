@@ -1,4 +1,3 @@
-#include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -7,98 +6,121 @@
 #include <semaphore.h>
 #include <string.h>
 #include <sys/wait.h>
-#include "../include.h"
+#include "communication.h"
 
-typedef struct {
-    int number;
-    int stop_flag; // 1 — завершить, 0 — продолжать
-} shared_data_t;
+static char CLIENT_PROGRAM_NAME[] = "./child.out";
+
+int read_str(char *str, size_t size) {
+    ssize_t status = read(STDIN_FILENO, str, size - 1);
+    if (status > 0) {
+        if (str[status - 1] == '\n') {
+            str[status - 1] = '\0';
+        } else {
+            str[status] = '\0';
+            char ch;
+            while (read(STDIN_FILENO, &ch, 1) > 0 && ch != '\n');
+            return 1;
+        }
+        return 0;
+    }
+    return 1;
+}
+
 
 int main() {
-    // Ввод имени файла
-    char filename[128];
-    printf("Enter the name of the output file: ");
-    if (fgets(filename, sizeof(filename), stdin) == NULL) {
-        fprintf(stderr, "Failed to read file name\n");
+    char filename[130];
+    {
+        const char msg[] = "Enter the name of file: ";
+        write(STDIN_FILENO, msg, sizeof(msg));
+    }
+        
+    if (read_str(filename, sizeof(filename)) != 0) {
+        const char msg[] = "Failed to read file\n";
+        write(STDERR_FILENO, msg, sizeof(msg));
         exit(EXIT_FAILURE);
     }
-    filename[strcspn(filename, "\n")] = '\0'; // Удаление символа новой строки
 
-    // Удаление существующего семафора и разделяемой памяти
-    // sem_unlink(REQ_SEM_NAME);
-    // sem_unlink(RES_SEM_NAME);
-    // shm_unlink(SHM_NAME);
+    sem_unlink(REQ_SEM_NAME);
+    sem_unlink(RES_SEM_NAME);
 
-    // Создание разделяемой памяти
     int shm_fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
     if (shm_fd == -1) {
-        perror("shm_open");
+        const char msg[] = "Error: shm_open\n";
+        write(STDERR_FILENO, msg, sizeof(msg));
         exit(EXIT_FAILURE);
     }
 
-    // Установка размера разделяемой памяти
     if (ftruncate(shm_fd, sizeof(shared_data_t)) == -1) {
-        perror("ftruncate");
+        const char msg[] = "Error: ftruncate\n";
+        write(STDERR_FILENO, msg, sizeof(msg));
         exit(EXIT_FAILURE);
     }
 
-    // Маппинг разделяемой памяти
     shared_data_t *shared_data = mmap(NULL, sizeof(shared_data_t), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
     if (shared_data == MAP_FAILED) {
-        perror("mmap");
+        const char msg[] = "Error: mmap\n";
+        write(STDERR_FILENO, msg, sizeof(msg));
+        exit(EXIT_FAILURE); 
+    }
+
+    sem_t *sem_to_child = sem_open(REQ_SEM_NAME, O_CREAT, 0666, 0);
+    sem_t *sem_to_parent = sem_open(RES_SEM_NAME, O_CREAT, 0666, 0);
+    
+    if (sem_to_child == SEM_FAILED || sem_to_parent == SEM_FAILED) {
+        const char msg[] = "Error: sem_open\n";
+        write(STDERR_FILENO, msg, sizeof(msg));
         exit(EXIT_FAILURE);
     }
 
-    // Создание семафоров
-    sem_t *req_sem = sem_open(REQ_SEM_NAME, O_CREAT | O_EXCL, 0666, 0);
-    sem_t *res_sem = sem_open(RES_SEM_NAME, O_CREAT | O_EXCL, 0666, 0);
-    if (req_sem == SEM_FAILED || res_sem == SEM_FAILED) {
-        perror("sem_open");
-        exit(EXIT_FAILURE);
-    }
-
-    // Создание дочернего процесса
     pid_t pid = fork();
     if (pid == -1) {
-        perror("fork");
+        const char msg[] = "Error: fork\n";
+        write(STDERR_FILENO, msg, sizeof(msg));
         exit(EXIT_FAILURE);
     } else if (pid == 0) {
-        // Дочерний процесс
-        execl("./child.out", "./child.out", filename, NULL);
-        perror("execl");
-        exit(EXIT_FAILURE);
-    }
-
-    // Родительский процесс
-    while (1) {
-        int number;
-        printf("Parent: Enter a number: ");
-        if (scanf("%d", &number) != 1) break;
-        // Очистка входного буфера
-        while (getchar() != '\n');
-
-        shared_data->number = number;
-        shared_data->stop_flag = 0; // Сброс флага завершения
-        printf("Parent set number to %d\n", shared_data->number);
-        sem_post(req_sem); // Сигнал ребенку
-        printf("Parent posted request semaphore\n");
-
-        sem_wait(res_sem); // Ожидание сигнала от ребенка
-        printf("Parent received response semaphore\n");
-        if (shared_data->stop_flag) {
-            printf("Parent: Received stop flag. Exiting...\n");
-            break;
+        int status = execl(CLIENT_PROGRAM_NAME, CLIENT_PROGRAM_NAME, filename, NULL);
+        
+        if (status == -1) {
+            const char msg[] = "Error: execl\n";
+            write(STDERR_FILENO, msg, sizeof(msg));
+            exit(EXIT_FAILURE);
         }
     }
 
-    // Ожидание завершения дочернего процесса
-    pid_t status = waitpid(pid, NULL, 0);
-    if (status == -1) perror("waitpid");
+    {
+        const char msg[] = "Enter numbers. If you want to stop, enter the prime number or Ctrl + D:\n";
+        write(STDIN_FILENO, msg, sizeof(msg));
+    }
 
-    // Очистка
+    shared_data->stop_flag = 0;
+
+    while (!shared_data->stop_flag) {    
+
+        char buffer[30];
+        ssize_t bytes_read = read(STDIN_FILENO, buffer, sizeof(buffer));
+        if (bytes_read <= 0) {
+            shared_data->number = -1;
+            sem_post(sem_to_child);
+            break;
+        }
+
+        int number = atoi(buffer);
+
+        shared_data->number = number;
+        sem_post(sem_to_child);
+        sem_wait(sem_to_parent);
+    }
+    
+    pid_t status = waitpid(pid, NULL, 0);
+    if (status == -1) {
+        const char msg[] = "Error: waitpid\n";
+        write(STDERR_FILENO, msg, sizeof(msg));
+        exit(EXIT_FAILURE);
+    }
+
     munmap(shared_data, sizeof(shared_data_t));
-    sem_close(req_sem);
-    sem_close(res_sem);
+    sem_close(sem_to_child);
+    sem_close(sem_to_parent);
     sem_unlink(REQ_SEM_NAME);
     sem_unlink(RES_SEM_NAME);
     shm_unlink(SHM_NAME);
